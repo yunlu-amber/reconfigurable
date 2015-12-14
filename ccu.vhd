@@ -2,6 +2,8 @@ library IEEE;
 use IEEE.STD_LOGIC_1164.all;
 use ieee.numeric_std.all;
 
+--read  8 int16 (8*16 = 4*32 = four read from memory) value into one buffer, and do the computation on another buffer. 
+
 entity ccu is
   
   port (
@@ -37,8 +39,26 @@ architecture array_add of ccu is
   signal current_state, next_state        : compute_state_t;
   signal set_count, incr, set_data, ready : std_logic;
   signal data_r, count_r                  : unsigned(31 downto 0);
-  
+  signal count8_r                         : unsigned(31 downto 0);
+
+  -- buffer read related signals
+  type PIX is std_logic_vector(15 downto 0);
+  type COL is array (0 to 7) of PIX;
+  signal data_buffer                      : COL;
+  signal buffer_valid                     : std_logic;
+  signal to_fill_buffer, is_filling       : std_logic;
+  signal inputCol                         : COL
+
+  type   compute_state_t_buffer is (idle_s_buffer, read_s_buffer, wait_s_buffer);
+  signal current_state_buffer, next_state_buffer        : compute_state_t_buffer;
+  signal set_count_buffer, incr_buffer, set_data_buffer, ready_buffer : std_logic;
+  signal data_r_buffer, count_r_buffer                  : unsigned(31 downto 0);
+
 begin  -- behavioral
+
+  -- read 4 times from DMA to fill one buffer, a figure nead 8 times of buffer data.  
+  --count4_r      <= to_unsigned(4, 32);
+  count8_r      <= to_unsigned(8, 32);
 
   xreg_process : process (address_r, ready, size_r, value_r, xreg_address,
                           xreg_write_enable)
@@ -75,8 +95,8 @@ begin  -- behavioral
         xreg_read_data(0) <= ready;
       when "01" =>
         xreg_read_data <= std_logic_vector(address_r);
-      when "10" =>
-        xreg_read_data <= std_logic_vector(size_r);
+      --when "10" =>
+      --  xreg_read_data <= std_logic_vector(size_r);
       when "11" =>
         xreg_read_data <= std_logic_vector(value_r);
       when others =>
@@ -90,8 +110,8 @@ begin  -- behavioral
   dma_burst      <= '0';
   dma_size       <= "100";
 
-  compute_process : process (count_r, current_state, dma_data_valid, size_r,
-                             start)
+  compute_process : process (count_r, current_state, size_r,
+                             start,buffer_valid)
   begin  -- process compute_process
     next_state <= current_state;
     set_count  <= '0';
@@ -106,24 +126,39 @@ begin  -- behavioral
     case current_state is
       when idle_s =>
         ready <= '1';
-        if start = '1' and size_r /= 0 then
-          set_count  <= '1';
+        --if start = '1' and size_r /= 0 then
+        if start = '1' then
+          set_count     <= '1';
+          buffer_valid  <= '0';
+          to_fill_buffer<= '0';
+          data_buffer   <= (others => '0');
+          is_filling    <= '0';
           next_state <= read_s;
         end if;
       when read_s =>
-        dma_read_enable <= '1';
+        --dma_read_enable <= '1';      
+        count_r_buffer  <= 0;
+        to_fill_buffer  <= '1';
+        is_filling      <= '1';
         next_state      <= wait_s;
       when wait_s =>
-        if dma_data_valid = '1' then
+        if buffer_valid = '1'  then  -- means there is one buffer available
           set_data   <= '1';
           next_state <= write_s;
-        else
-          dma_read_enable <= '1';
+        else 
+            if is_filling = '0' then
+              next_state      <= read_s;
+            else
+              next_state      <= wait_s;
+            end if;
+          --dma_read_enable <= '1';
         end if;
       when write_s =>
         dma_write_enable <= '1';
-        if dma_data_valid = '1' then
-          if count_r >= size_r then
+        --if dma_data_valid = '1' then
+        if buffer_valid = '1' then
+          --if count_r >= size_r then
+          if count_r >= count8_r then
             next_state <= idle_s;
           else
             incr       <= '1';
@@ -131,7 +166,8 @@ begin  -- behavioral
           end if;
         end if;
       when wait2_s =>
-        if dma_data_valid = '1' then
+        --if dma_data_valid = '1' then
+        if buffer_valid = '1' then
           next_state <= read_s;
         end if;
       when others =>
@@ -149,6 +185,12 @@ begin  -- behavioral
         value_r       <= (others => '0');
         count_r       <= (others => '0');
         data_r        <= (others => '0');
+        buffer_valid  <= '0';
+        data_buffer   <= (others => '0');
+        to_fill_buffer<= '0';
+        is_filling    <= '0';
+        --reset for load                  need modified
+        current_state_buffer <= idle_s_buffer;
       else
 
         if set_address = '1' then
@@ -170,11 +212,54 @@ begin  -- behavioral
           count_r   <= count_r + 1;
           address_r <= address_r + 4;
         end if;
+        if incr_buffer = '1' then
+          count_r_buffer   <= count_r_buffer + 1;
+          address_r <= address_r + 4;
+        end if;
         if set_data = '1' then
-          data_r <= unsigned(dma_read_data) + value_r;
+          inputCol <= data_buffer;
+          --data_r <= unsigned(dma_read_data) + value_r;
+          --add vhdl main part to here
+        end if;
+        if set_data_buffer = '1' then
+          data_r <= unsigned(dma_read_data);        --need modified
+          --add vhdl main part to here
         end if;
       end if;
     end if;
   end process clk_process;
 
+  fill_buffer_process : process (to_fill_buffer, current_state_buffer)
+  variable count_buffer : unsigned(31 downto 0) := 4;
+  begin
+    next_state_buffer <= current_state_buffer;
+      case current_state_buffer is
+        when idle_s_buffer =>
+        ready_buffer <= '1';
+          if to_fill_buffer = '1'then
+            set_count_buffer  <= '1';
+            next_state_buffer <= read_s_buffer;
+          end if;
+        when read_s_buffer =>
+          dma_read_enable     <= '1';
+          next_state_buffer   <= wait_s_buffer;
+        when wait_s_buffer =>
+          if dma_data_valid   = '1' then
+            set_data_buffer   <= '1';
+            next_state <= write_s;
+            if count_r_buffer >= count_buffer then
+              buffer_valid    <= '1';
+              to_fill_buffer  <= '0';
+              next_state_buffer <= idle_s_buffer;
+            else
+              incr_buffer     <= '1';
+              next_state      <= read_s_buffer;
+            end if;
+          else
+            dma_read_enable   <= '1';
+          end if;
+        when others =>
+          next_state_buffer   <= idle_s_buffer;
+      end case;
+  end process fill_buffer_process;
 end array_add;
